@@ -402,11 +402,10 @@ function perform_step!(cache::TrustRegionCache{true})
     @unpack make_new_J, J, fu, f, u, p, u_tmp, alg, linsolve = cache
     if cache.make_new_J
         jacobian!(J, cache)
-        mul!(cache.H, J, J)
-        mul!(cache.g, J, fu)
+        mul!(cache.H, J', J) # error: same issue?!
+        mul!(cache.g, J', fu)
         cache.stats.njacs += 1
     end
-
     linres = dolinsolve(alg.precs, linsolve, A = cache.H, b = _vec(cache.g),
         linu = _vec(u_tmp),
         p = p, reltol = cache.abstol)
@@ -425,18 +424,17 @@ function perform_step!(cache::TrustRegionCache{true})
 end
 
 function perform_step!(cache::TrustRegionCache{false})
-    @unpack make_new_J, fu, f, u, p = cache
-
+    @unpack make_new_J, fu, f, u, p = cache 
     if make_new_J
         J = jacobian(cache, f)
-        cache.H = J * J
-        cache.g = J * fu
+        cache.H = J' * J # error: shouldn't one of them be transposed?! 
+        cache.g = J' * fu
         cache.stats.njacs += 1
     end
 
     @unpack g, H = cache
     # Compute the Newton step.
-    cache.u_tmp = -H \ g
+    cache.u_tmp = -H \ g 
     dogleg!(cache)
 
     # Compute the potentially new u
@@ -452,33 +450,34 @@ end
 function retrospective_step!(cache::TrustRegionCache{true})
     @unpack J, fu_prev, fu, u_prev, u = cache
     jacobian!(J, cache)
-    mul!(cache.H, J, J)
-    mul!(cache.g, J, fu)
+    mul!(cache.H, J', J) # same issue?
+    mul!(cache.g, J', fu)
     cache.stats.njacs += 1
     @unpack H, g, step_size = cache
 
     return -(get_loss(fu_prev) - get_loss(fu)) /
-           (step_size' * g + step_size' * H * step_size / 2)
+           (dot(step_size, g) + dot(step_size, H, step_size) / 2)
 end
 
 function retrospective_step!(cache::TrustRegionCache{false})
     @unpack J, fu_prev, fu, u_prev, u, f = cache
     J = jacobian(cache, f)
-    cache.H = J * J
-    cache.g = J * fu
+    cache.H = J' * J # same issue?
+    cache.g = J' * fu
     cache.stats.njacs += 1
     @unpack H, g, step_size = cache
 
     return -(get_loss(fu_prev) - get_loss(fu)) /
-           (step_size' * g + step_size' * H * step_size / 2)
+           (dot(step_size, g) + dot(step_size, H, step_size) / 2)
 end
 
+# this function adopts the trust region size and checks convergence (based on merit function and residual norm)
 function trust_region_step!(cache::TrustRegionCache)
     @unpack fu_new, step_size, g, H, loss, max_trust_r, radius_update_scheme = cache
     cache.loss_new = get_loss(fu_new)
 
     # Compute the ratio of the actual reduction to the predicted reduction.
-    cache.r = -(loss - cache.loss_new) / (step_size' * g + step_size' * H * step_size / 2)
+    cache.r = -(loss - cache.loss_new) / (dot(step_size, g) + dot(step_size, H, step_size) / 2)
     @unpack r = cache
 
     if radius_update_scheme === RadiusUpdateSchemes.Simple
@@ -600,17 +599,23 @@ function trust_region_step!(cache::TrustRegionCache)
     end
 end
 
+# applies the actual stepping
 function dogleg!(cache::TrustRegionCache)
     @unpack u_tmp, trust_r = cache
 
     # Test if the full step is within the trust region.
     if norm(u_tmp) ≤ trust_r
+        println("Gauss Newton")
         cache.step_size = deepcopy(u_tmp)
         return
     end
 
+    # check if this is right or buggy -> since the first iterations are fine and the things go awry
     # Calcualte Cauchy point, optimum along the steepest descent direction.
-    δsd = -cache.g
+
+    # There are some issues here
+    #= 
+    δsd = -cache.g # unless g is already scaled properly this is not the right step size?!
     norm_δsd = norm(δsd)
     if norm_δsd ≥ trust_r
         cache.step_size = δsd .* trust_r / norm_δsd
@@ -625,6 +630,31 @@ function dogleg!(cache::TrustRegionCache)
     fact = dot_sd_N_sd^2 - dot_N_sd * (dot_sd - trust_r^2)
     τ = (-dot_sd_N_sd + sqrt(fact)) / dot_N_sd
     cache.step_size = δsd + τ * N_sd
+    =#
+    
+    len_grad = norm(cache.g)
+    d_cauchy = len_grad^3 / dot(cache.g, cache.H, cache.g) # distance of the cauchy point from the current iterate
+    if d_cauchy > trust_r # cauchy point lies outside of trust region
+        cache.step_size = - (trust_r/len_grad) * cache.g # step to the end of the trust region
+        println("full cauchy step")
+        return
+    end
+    
+    # cauchy point lies inside the trust region
+    u_c = - (d_cauchy/len_grad) * cache.g
+
+    # if norm_u_c ≥ trust_r
+    #     cache.step_size = (trust_r/norm_u_c) .* u_c
+    #     return
+    # end
+
+    # Find the intersection point on the boundary.
+    Δ = u_tmp - u_c # calf of the dogleg
+    θ = dot(Δ, u_c) # ~ cos(∠(calf,thigh)) 
+    l_calf = dot(Δ,Δ)
+    τ = ( -θ + sqrt( max(θ^2 + l_calf*(trust_r^2 - d_cauchy^2), 0) ) )/ l_calf # stepsize along dogleg
+    cache.step_size = u_c + τ * Δ
+    println("dogleg to boundary")
 end
 
 function take_step!(cache::TrustRegionCache{true})
