@@ -434,7 +434,7 @@ function perform_step!(cache::TrustRegionCache{false})
 
     @unpack g, H = cache
     # Compute the Newton step.
-    cache.u_tmp = -H \ g 
+    cache.u_tmp = - H \ g 
     dogleg!(cache)
 
     # Compute the potentially new u
@@ -456,7 +456,7 @@ function retrospective_step!(cache::TrustRegionCache{true})
     @unpack H, g, step_size = cache
 
     return -(get_loss(fu_prev) - get_loss(fu)) /
-           (dot(step_size, g) + dot(step_size, H, step_size) / 2)
+           (dot(g, step_size) + dot(step_size, H, step_size) / 2)
 end
 
 function retrospective_step!(cache::TrustRegionCache{false})
@@ -468,7 +468,7 @@ function retrospective_step!(cache::TrustRegionCache{false})
     @unpack H, g, step_size = cache
 
     return -(get_loss(fu_prev) - get_loss(fu)) /
-           (dot(step_size, g) + dot(step_size, H, step_size) / 2)
+           (dot(g, step_size) + dot(step_size, H, step_size) / 2)
 end
 
 # this function adopts the trust region size and checks convergence (based on merit function and residual norm)
@@ -477,23 +477,22 @@ function trust_region_step!(cache::TrustRegionCache)
     cache.loss_new = get_loss(fu_new)
 
     # Compute the ratio of the actual reduction to the predicted reduction.
-    cache.r = -(loss - cache.loss_new) / (dot(step_size, g) + dot(step_size, H, step_size) / 2)
+    cache.r = -(loss - cache.loss_new) / (dot(g, step_size) + dot(step_size, H, step_size) / 2) # denominator < 0 by construction
     @unpack r = cache
-
     if radius_update_scheme === RadiusUpdateSchemes.Simple
         # Update the trust region radius.
-        if r < cache.shrink_threshold
-            cache.trust_r *= cache.shrink_factor
+        if r < cache.shrink_threshold # 0.1
+            cache.trust_r *= cache.shrink_factor # 1/2
             cache.shrink_counter += 1
         else
             cache.shrink_counter = 0
         end
-        if r > cache.step_threshold
+        if r > cache.step_threshold # 1e-4
             take_step!(cache)
             cache.loss = cache.loss_new
-
+            println("rho = $r, new loss = $(cache.loss_new)")
             # Update the trust region radius.
-            if r > cache.expand_threshold
+            if r > cache.expand_threshold # 
                 cache.trust_r = min(cache.expand_factor * cache.trust_r, max_trust_r)
             end
 
@@ -605,7 +604,7 @@ function dogleg!(cache::TrustRegionCache)
 
     # Test if the full step is within the trust region.
     if norm(u_tmp) ≤ trust_r
-        println("Gauss Newton")
+        println("Gauss Newton step")
         cache.step_size = deepcopy(u_tmp)
         return
     end
@@ -636,23 +635,18 @@ function dogleg!(cache::TrustRegionCache)
     d_cauchy = len_grad^3 / dot(cache.g, cache.H, cache.g) # distance of the cauchy point from the current iterate
     if d_cauchy > trust_r # cauchy point lies outside of trust region
         cache.step_size = - (trust_r/len_grad) * cache.g # step to the end of the trust region
-        println("full cauchy step")
+        println("gd step to boundary")
         return
     end
     
     # cauchy point lies inside the trust region
     u_c = - (d_cauchy/len_grad) * cache.g
 
-    # if norm_u_c ≥ trust_r
-    #     cache.step_size = (trust_r/norm_u_c) .* u_c
-    #     return
-    # end
-
     # Find the intersection point on the boundary.
     Δ = u_tmp - u_c # calf of the dogleg
     θ = dot(Δ, u_c) # ~ cos(∠(calf,thigh)) 
-    l_calf = dot(Δ,Δ)
-    τ = ( -θ + sqrt( max(θ^2 + l_calf*(trust_r^2 - d_cauchy^2), 0) ) )/ l_calf # stepsize along dogleg
+    l_calf = dot(Δ,Δ) # length of the calf of the dogleg
+    τ = ( -θ + sqrt( max(θ^2 + l_calf*(trust_r^2 - d_cauchy^2), 0) ) ) / l_calf # stepsize along dogleg
     cache.step_size = u_c + τ * Δ
     println("dogleg to boundary")
 end
